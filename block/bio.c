@@ -1109,7 +1109,7 @@ void __bio_add_page(struct bio *bio, struct page *page,
 	WARN_ON_ONCE(bio_full(bio, len));
 
 	bvec_set_page(&bio->bi_io_vec[bio->bi_vcnt], page, len, off);
-	bio->bi_iter.bi_size += len;
+	if(!bio->hit_enabled) bio->bi_iter.bi_size += len;
 	bio->bi_vcnt++;
 }
 EXPORT_SYMBOL_GPL(__bio_add_page);
@@ -1207,7 +1207,11 @@ static int bio_iov_add_page(struct bio *bio, struct page *page,
 {
 	bool same_page = false;
 
-	if (!__bio_try_merge_page(bio, page, len, offset, &same_page)) {
+	if(bio->hit_enabled){
+		//zhengxd: modify bio->bi_iter.bi_size
+		__bio_add_page(bio, page, len, offset);
+		return 0;
+	} else if (!__bio_try_merge_page(bio, page, len, offset, &same_page)) {
 		__bio_add_page(bio, page, len, offset);
 		return 0;
 	}

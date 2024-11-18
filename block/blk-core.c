@@ -824,7 +824,11 @@ EXPORT_SYMBOL(submit_bio_noacct);
 void submit_bio(struct bio *bio)
 {
 	if (bio_op(bio) == REQ_OP_READ) {
-		task_io_account_read(bio->bi_iter.bi_size);
+		if(bio->hit_enabled){
+			task_io_account_read((bio->bi_iter.bi_size * (bio->hit->max + 2)));
+		} else {
+			task_io_account_read(bio->bi_iter.bi_size);
+		}
 		count_vm_events(PGPGIN, bio_sectors(bio));
 	} else if (bio_op(bio) == REQ_OP_WRITE) {
 		count_vm_events(PGPGOUT, bio_sectors(bio));

@@ -373,6 +373,8 @@
 449	common	futex_waitv		sys_futex_waitv
 450	common	set_mempolicy_home_node	sys_set_mempolicy_home_node
 451	common	cachestat		sys_cachestat
+452	64	io_submit_hit		sys_io_submit_hit
+453	common	print_hit_stats		sys_print_hit_stats
 
 #
 # Due to a historical design error, certain syscalls are numbered differently

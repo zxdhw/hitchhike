@@ -74,6 +74,8 @@ struct landlock_ruleset_attr;
 enum landlock_rule_type;
 struct cachestat_range;
 struct cachestat;
+struct hit_stats;
+struct hitchhiker;
 
 #include <linux/types.h>
 #include <linux/aio_abi.h>
@@ -317,6 +319,8 @@ asmlinkage long sys_io_setup(unsigned nr_reqs, aio_context_t __user *ctx);
 asmlinkage long sys_io_destroy(aio_context_t ctx);
 asmlinkage long sys_io_submit(aio_context_t, long,
 			struct iocb __user * __user *);
+asmlinkage long sys_io_submit_hit(aio_context_t, long, struct iocb __user * __user *,
+			char __user * __user *);
 asmlinkage long sys_io_cancel(aio_context_t ctx_id, struct iocb __user *iocb,
 			      struct io_event __user *result);
 asmlinkage long sys_io_getevents(aio_context_t ctx_id,
@@ -1283,4 +1287,6 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
 		int __user *optlen);
 int __sys_setsockopt(int fd, int level, int optname, char __user *optval,
 		int optlen);
+
+asmlinkage long sys_print_hit_stats(struct hit_stats __user *buf);
 #endif

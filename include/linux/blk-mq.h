@@ -187,6 +187,14 @@ struct request {
 		u64 fifo_time;
 	};
 
+	//zhengxd: hit related
+	u64 hit_value;
+	u64 hit;
+	u64 once;
+	unsigned int *hit_tags;
+	int main_tag;
+	struct request* main_req;
+	
 	/*
 	 * completion callback.
 	 */

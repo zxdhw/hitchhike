@@ -3,6 +3,7 @@
  * Copyright (C) 2010 Red Hat, Inc.
  * Copyright (c) 2016-2021 Christoph Hellwig.
  */
+#include "linux/aio_abi.h"
 #include <linux/module.h>
 #include <linux/compiler.h>
 #include <linux/fs.h>
@@ -153,6 +154,12 @@ void iomap_dio_bio_end_io(struct bio *bio)
 	struct iomap_dio *dio = bio->bi_private;
 	bool should_dirty = (dio->flags & IOMAP_DIO_DIRTY);
 
+	if(bio->hit_enabled){
+		kfree(dio->iocb->hit);
+		bio->hit = NULL;
+		dio->iocb->hit = NULL;
+	}
+
 	if (bio->bi_status)
 		iomap_dio_set_error(dio, blk_status_to_errno(bio->bi_status));
 
@@ -271,7 +278,9 @@ static loff_t iomap_dio_bio_iter(const struct iomap_iter *iter,
 	 * we are done.
 	 */
 	orig_count = iov_iter_count(dio->submit.iter);
-	iov_iter_truncate(dio->submit.iter, length);
+	//zhengxd： disable truncate
+	if(!dio->iocb->hit_enabled)
+		iov_iter_truncate(dio->submit.iter, length);
 
 	if (!iov_iter_count(dio->submit.iter))
 		goto out;
@@ -313,6 +322,9 @@ static loff_t iomap_dio_bio_iter(const struct iomap_iter *iter,
 		bio->bi_ioprio = dio->iocb->ki_ioprio;
 		bio->bi_private = dio;
 		bio->bi_end_io = iomap_dio_bio_end_io;
+		
+		//zhengxd: bio_iov_iter_get_page need hit_enabled
+		bio->hit_enabled = dio->iocb->hit_enabled;
 
 		ret = bio_iov_iter_get_pages(bio, dio->submit.iter);
 		if (unlikely(ret)) {
@@ -324,6 +336,52 @@ static loff_t iomap_dio_bio_iter(const struct iomap_iter *iter,
 			 */
 			bio_put(bio);
 			goto zero_tail;
+		}
+
+		if (bio->hit_enabled) {
+
+			//zhengxd: init bi_size with data_len
+			bio->bi_iter.bi_size = dio->iocb->data_len;
+			bio->hit = dio->iocb->hit;
+			u64 len, end, offset;
+			int iter;
+			if(bio->hit->in_use){
+				for(iter = 0; iter <= bio->hit->max && (iter <= HIT_MAX) ; iter++){
+					//zhengxd: size should to be the same
+					len = bio->hit->size;
+					offset = bio->hit->addr[iter];
+					struct iomap iomap_t = { .type = IOMAP_HOLE };
+					struct iomap srcmap_t = { .type = IOMAP_HOLE };
+					ret = dio->iocb->ops->iomap_begin(inode, offset, len, iomap->flags, &iomap_t, &srcmap_t);
+					if (ret){
+						bio_put(bio);
+						return ret;
+					}
+					if (WARN_ON(iomap_t.offset > offset)) {
+						bio_put(bio);
+						return -EIO;
+					}
+					if (WARN_ON(iomap_t.length == 0)) {
+						bio_put(bio);
+						return -EIO;
+					}
+					
+					end = iomap_t.offset + iomap_t.length;
+					if (srcmap_t.type != IOMAP_HOLE)
+						end = min(end, srcmap_t.offset + srcmap_t.length);
+					//zhengxd: length check and cut
+					if (offset + length > end)
+						len = end - offset;
+					// lba in 512B
+					if(len != bio->hit->size){
+						printk("hitchhike iomap hit error: length is %lld", len);
+						bio_put(bio);
+						return -EIO;
+					}
+					bio->hit->addr[iter] = iomap_sector(&iomap_t, offset);
+				
+				}
+			}
 		}
 
 		n = bio->bi_iter.bi_size;
@@ -339,6 +397,11 @@ static loff_t iomap_dio_bio_iter(const struct iomap_iter *iter,
 
 		nr_pages = bio_iov_vecs_to_alloc(dio->submit.iter,
 						 BIO_MAX_VECS);
+		if (bio->hit_enabled) {
+			if(nr_pages){
+				printk("hitchhike: iomap dio error: nrpage is %d",nr_pages);
+			}
+		}
 		/*
 		 * We can only poll for single bio I/Os.
 		 */
@@ -479,6 +542,13 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		.flags		= IOMAP_DIRECT,
 		.private	= private,
 	};
+	
+	//zhengxd: get hitchhike data size
+	size_t data_len = iocb->data_len;
+	if(iocb->hit_enabled){
+		iomi.len = data_len;
+	}
+
 	bool wait_for_completion =
 		is_sync_kiocb(iocb) || (dio_flags & IOMAP_DIO_FORCE_WAIT);
 	struct blk_plug plug;
@@ -564,6 +634,33 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		if (!wait_for_completion && !inode->i_sb->s_dio_done_wq) {
 			ret = sb_init_dio_done_wq(inode->i_sb);
 			if (ret < 0)
+				goto out_free_dio;
+		}
+	}
+
+	if(iocb->hit_enabled){
+		// zhengxd: kernel stat
+		// ktime_t hit_start = ktime_get();
+		struct hitchhiker *hit;
+		hit = kmalloc(sizeof(struct hitchhiker), GFP_KERNEL);
+		if(!hit){
+			goto out_free_dio;
+		}
+		if (unlikely(copy_from_user(hit, dio->iocb->hit, sizeof(struct hitchhiker)))){
+			goto out_free_dio;
+		}
+		
+		// atomic_long_add(ktime_sub(ktime_get(), hit_start), &hit_buf_time);
+		dio->iocb->hit = hit;
+
+		int i;
+		struct address_space *mapping = iocb->ki_filp->f_mapping;
+		for(i = 0; i <= iocb->hit->max && i <= HIT_MAX; i++){
+			ret = rw_verify_area(READ, iocb->ki_filp, &iocb->hit->addr[i], data_len);
+			if (ret)
+				goto out_free_dio;
+			ret = filemap_write_and_wait_range(mapping, iocb->hit->addr[i], (iocb->hit->addr[i] + data_len - 1));
+			if (ret)
 				goto out_free_dio;
 		}
 	}
@@ -661,6 +758,10 @@ iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		unsigned int dio_flags, void *private, size_t done_before)
 {
 	struct iomap_dio *dio;
+	//zhengxd: pass the iomap ops to iocb
+	if(iocb->hit_enabled){
+		iocb->ops = ops;
+	}
 
 	dio = __iomap_dio_rw(iocb, iter, ops, dops, dio_flags, private,
 			     done_before);

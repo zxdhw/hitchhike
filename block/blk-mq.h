@@ -158,6 +158,11 @@ struct blk_mq_alloc_data {
 	/* input & output parameter */
 	struct blk_mq_ctx *ctx;
 	struct blk_mq_hw_ctx *hctx;
+
+	/* hit tag*/
+	unsigned int nr;
+	unsigned int *hit_tags;
+
 };
 
 struct blk_mq_tags *blk_mq_init_tags(unsigned int nr_tags,

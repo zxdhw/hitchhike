@@ -17,6 +17,7 @@
 #include <linux/fs.h>
 #include <linux/module.h>
 #include "blk.h"
+#include "linux/aio_abi.h"
 
 static inline struct inode *bdev_file_inode(struct file *file)
 {
@@ -215,12 +216,61 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 		bio->bi_end_io = blkdev_bio_end_io;
 		bio->bi_ioprio = iocb->ki_ioprio;
 
+		//zhengxd: before get page
+		bio->hit_enabled = iocb->hit_enabled;
+
 		ret = bio_iov_iter_get_pages(bio, iter);
 		if (unlikely(ret)) {
 			bio->bi_status = BLK_STS_IOERR;
 			bio_endio(bio);
 			break;
 		}
+
+		if (bio->hit_enabled) {
+			// zhengxd: address check
+			struct hitchhiker *hit;
+			hit = kmalloc(sizeof(struct hitchhiker), GFP_KERNEL);
+			if(!hit){
+				bio->bi_status = BLK_STS_IOERR;
+				bio_endio(bio);
+				break;
+			}
+			if (unlikely(copy_from_user(hit, iocb->hit, sizeof(struct hitchhiker)))){
+				bio->bi_status = BLK_STS_IOERR;
+				bio_endio(bio);
+				break;
+			}
+
+			//zhengxd: init bi_size with data_len
+			bio->bi_iter.bi_size = iocb->data_len;
+			iocb->hit = hit;
+			bio->hit = iocb->hit;
+			
+			if (bio->hit->in_use){
+				int i,ret;
+				loff_t offset;
+				loff_t size = bdev_nr_bytes(bdev);
+				struct address_space *mapping = iocb->ki_filp->f_mapping;
+				for(i = 0; i <= iocb->hit->max && i <= HIT_MAX; i++){
+					offset = iocb->hit->addr[i];
+
+					if (offset >= size){
+						bio->bi_status = BLK_STS_IOERR;
+						bio_endio(bio);
+						break;
+					}
+					ret = filemap_write_and_wait_range(mapping,
+								offset, offset + iocb->data_len - 1);
+					if (ret < 0){
+						bio->bi_status = BLK_STS_IOERR;
+						bio_endio(bio);
+						break;
+					}
+					iocb->hit->addr[i] = offset >> SECTOR_SHIFT;
+				}
+			}
+		}
+
 		if (iocb->ki_flags & IOCB_NOWAIT) {
 			/*
 			 * This is nonblocking IO, and we need to allocate
@@ -356,6 +406,47 @@ static ssize_t __blkdev_direct_IO_async(struct kiocb *iocb,
 		}
 	} else {
 		task_io_account_write(bio->bi_iter.bi_size);
+	}
+
+	if (bio->hit_enabled) {
+		// zhengxd: address check
+		struct hitchhiker *hit;
+		hit = kmalloc(sizeof(struct hitchhiker), GFP_KERNEL);
+		if(!hit){
+			bio_endio(bio);
+			return -ETOOSMALL;
+		}
+		if (unlikely(copy_from_user(hit, iocb->hit, sizeof(struct hitchhiker)))){
+			bio_endio(bio);
+			return -ETOOSMALL;
+		}
+
+		//zhengxd: init bi_size with data_len
+		bio->bi_iter.bi_size = iocb->data_len;
+		iocb->hit = hit;
+		bio->hit = iocb->hit;
+		
+		if (bio->hit->in_use){
+			int i,ret;
+			loff_t offset;
+			loff_t size = bdev_nr_bytes(bdev);
+			struct address_space *mapping = iocb->ki_filp->f_mapping;
+			for(i = 0; i <= iocb->hit->max && i <= HIT_MAX; i++){
+				offset = iocb->hit->addr[i];
+
+				if (offset >= size){
+					bio_endio(bio);
+					return -ENOTSUPP;
+				}
+				ret = filemap_write_and_wait_range(mapping,
+							offset, offset + iocb->data_len - 1);
+				if (ret < 0){
+					bio_endio(bio);
+					return -ENOTSUPP;
+				}
+				iocb->hit->addr[i] = offset >> SECTOR_SHIFT;
+			}
+		}
 	}
 
 	if (iocb->ki_flags & IOCB_NOWAIT)
@@ -586,15 +677,25 @@ static ssize_t blkdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	ssize_t ret = 0;
 	size_t count;
 
-	if (unlikely(pos + iov_iter_count(to) > size)) {
-		if (pos >= size)
+	if(iocb->hit_enabled){
+		if (unlikely(pos + iocb->data_len > size)) {
 			return 0;
-		size -= pos;
-		shorted = iov_iter_count(to) - size;
-		iov_iter_truncate(to, size);
+		}
+	} else {
+		if (unlikely(pos + iov_iter_count(to) > size)) {
+			if (pos >= size)
+				return 0;
+			size -= pos;
+			shorted = iov_iter_count(to) - size;
+			iov_iter_truncate(to, size);
+		}
 	}
 
 	count = iov_iter_count(to);
+
+	// zhengxd: reinit count
+	if(iocb->hit_enabled)
+		count = iocb->data_len;
 	if (!count)
 		goto reexpand; /* skip atime */
 
@@ -609,7 +710,7 @@ static ssize_t blkdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 			iocb->ki_pos += ret;
 			count -= ret;
 		}
-		iov_iter_revert(to, count - iov_iter_count(to));
+		if(!iocb->hit_enabled) iov_iter_revert(to, count - iov_iter_count(to));
 		if (ret < 0 || !count)
 			goto reexpand;
 	}

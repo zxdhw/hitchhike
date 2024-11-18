@@ -353,6 +353,9 @@ enum rw_hint {
 	{ IOCB_NOIO,		"NOIO" }, \
 	{ IOCB_ALLOC_CACHE,	"ALLOC_CACHE" }
 
+
+struct hitchhiker;
+
 struct kiocb {
 	struct file		*ki_filp;
 	loff_t			ki_pos;
@@ -361,6 +364,13 @@ struct kiocb {
 	int			ki_flags;
 	u16			ki_ioprio; /* See linux/ioprio.h */
 	struct wait_page_queue	*ki_waitq; /* for async buffered IO */
+	
+	//zhengxd: hitchhike info
+	bool			hit_enabled;
+	struct hitchhiker __user	*hit;
+	//zhengxd: represents a segment of file address space with ki_pos (start: ki_pos; end: ki_pos+xrp_data_len)
+	u64				data_len;
+	const struct iomap_ops *ops;
 };
 
 static inline bool is_sync_kiocb(struct kiocb *kiocb)
