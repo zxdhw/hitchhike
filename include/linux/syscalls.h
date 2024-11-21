@@ -320,7 +320,7 @@ asmlinkage long sys_io_destroy(aio_context_t ctx);
 asmlinkage long sys_io_submit(aio_context_t, long,
 			struct iocb __user * __user *);
 asmlinkage long sys_io_submit_hit(aio_context_t, long, struct iocb __user * __user *,
-			char __user * __user *);
+			struct hitchhiker __user * __user *);
 asmlinkage long sys_io_cancel(aio_context_t ctx_id, struct iocb __user *iocb,
 			      struct io_event __user *result);
 asmlinkage long sys_io_getevents(aio_context_t ctx_id,

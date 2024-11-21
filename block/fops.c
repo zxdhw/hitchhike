@@ -133,6 +133,12 @@ static void blkdev_bio_end_io(struct bio *bio)
 	struct blkdev_dio *dio = bio->bi_private;
 	bool should_dirty = dio->flags & DIO_SHOULD_DIRTY;
 
+	if(bio->hit_enabled && bio->hit){
+		kfree(dio->iocb->hit);
+		bio->hit = NULL;
+		dio->iocb->hit = NULL;
+	}
+
 	if (bio->bi_status && !dio->bio.bi_status)
 		dio->bio.bi_status = bio->bi_status;
 
@@ -336,6 +342,12 @@ static void blkdev_bio_end_io_async(struct bio *bio)
 	struct blkdev_dio *dio = container_of(bio, struct blkdev_dio, bio);
 	struct kiocb *iocb = dio->iocb;
 	ssize_t ret;
+
+	if(bio->hit_enabled && bio->hit){
+		kfree(dio->iocb->hit);
+		bio->hit = NULL;
+		dio->iocb->hit = NULL;
+	}
 
 	WRITE_ONCE(iocb->private, NULL);
 

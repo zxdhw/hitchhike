@@ -24,6 +24,13 @@
 extern "C" {
 #endif
 
+struct io_uring_hit {
+	__s32 max;
+	__s32 in_use;
+	__s32 size;
+	__s32 res;
+};
+
 /*
  * IO submission data structure (Submission Queue Entry)
  */
@@ -114,6 +121,7 @@ enum {
 	IOSQE_ASYNC_BIT,
 	IOSQE_BUFFER_SELECT_BIT,
 	IOSQE_CQE_SKIP_SUCCESS_BIT,
+	IOSQE_HIT_BIT,
 };
 
 /*
@@ -133,6 +141,8 @@ enum {
 #define IOSQE_BUFFER_SELECT	(1U << IOSQE_BUFFER_SELECT_BIT)
 /* don't post CQE if request succeeded */
 #define IOSQE_CQE_SKIP_SUCCESS	(1U << IOSQE_CQE_SKIP_SUCCESS_BIT)
+// hit enable
+#define IOSQE_HIT	(1U << IOSQE_HIT_BIT)
 
 /*
  * io_uring_setup() flags
@@ -184,6 +194,8 @@ enum {
  * than an fd.
  */
 #define IORING_SETUP_REGISTERED_FD_ONLY	(1U << 15)
+
+#define IORING_SETUP_HIT	(1U << 16)	/* io_context is hitchhike */
 
 enum io_uring_op {
 	IORING_OP_NOP,
@@ -406,6 +418,7 @@ enum {
 #define IORING_OFF_SQES			0x10000000ULL
 #define IORING_OFF_PBUF_RING		0x80000000ULL
 #define IORING_OFF_PBUF_SHIFT		16
+#define IORING_OFF_HIT			0x90000000ULL
 #define IORING_OFF_MMAP_MASK		0xf8000000ULL
 
 /*

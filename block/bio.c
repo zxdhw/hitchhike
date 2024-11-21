@@ -1174,11 +1174,23 @@ void __bio_release_pages(struct bio *bio, bool mark_dirty)
 	struct bvec_iter_all iter_all;
 	struct bio_vec *bvec;
 
-	bio_for_each_segment_all(bvec, bio, iter_all) {
-		if (mark_dirty && !PageCompound(bvec->bv_page))
-			set_page_dirty_lock(bvec->bv_page);
-		bio_release_page(bio, bvec->bv_page);
-	}
+	// if(bio->hit_enabled){
+	// 	unsigned int idx; 
+	// 	for (idx = 0; idx < bio->bi_vcnt;idx++){
+	// 		bvec = &bio->bi_io_vec[idx];
+	// 		if(bvec->bv_page){
+	// 			bio_release_page(bio, bvec->bv_page);
+	// 		} else {
+    // 			printk( "hitchhike: bio release page: Unexpected NULL page in bio_vec\n");
+	// 		}		
+	// 	}
+	// } else { 
+		bio_for_each_segment_all(bvec, bio, iter_all) {
+			if (mark_dirty && !PageCompound(bvec->bv_page))
+				set_page_dirty_lock(bvec->bv_page);
+			bio_release_page(bio, bvec->bv_page);
+		}
+	// }
 }
 EXPORT_SYMBOL_GPL(__bio_release_pages);
 

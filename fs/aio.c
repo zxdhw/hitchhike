@@ -2186,7 +2186,7 @@ static int __io_submit_hit_one(struct kioctx *ctx, const struct iocb *iocb,
 
 	switch (iocb->aio_lio_opcode) {
 	case IOCB_CMD_PREAD:
-		return aio_read_hit(&req->rw, iocb, false, compat);
+		return aio_read_hit(&req->rw, iocb, false, hit, compat);
 	default:
 		pr_debug("invalid aio operation %d\n", iocb->aio_lio_opcode);
 		return -EINVAL;
@@ -2238,7 +2238,7 @@ static int io_submit_hit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
 }
 
 //zhengxd: hitchhike path aio syscall
-SYSCALL_DEFINE3(io_submit_hit, aio_context_t, ctx_id, long, nr,
+SYSCALL_DEFINE4(io_submit_hit, aio_context_t, ctx_id, long, nr,
 		struct iocb __user * __user *, iocbpp, struct hitchhiker __user * __user *, hit_bufs)
 {
 	// zhengxd: kernel stat

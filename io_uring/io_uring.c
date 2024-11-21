@@ -2388,6 +2388,17 @@ static bool io_get_sqe(struct io_ring_ctx *ctx, const struct io_uring_sqe **sqe)
 	return false;
 }
 
+static bool io_get_hit(struct io_ring_ctx *ctx, struct hitchhiker **hit)
+{
+	unsigned head, mask = ctx->sq_entries - 1;
+	unsigned sq_idx = ctx->cached_sq_head++ & mask;
+
+	head = READ_ONCE(ctx->sq_array[sq_idx]);
+	*hit = &ctx->hit[head];
+	if((*hit)->in_use) return true;
+	return false;
+}
+
 int io_submit_sqes(struct io_ring_ctx *ctx, unsigned int nr)
 	__must_hold(&ctx->uring_lock)
 {
@@ -2411,6 +2422,13 @@ int io_submit_sqes(struct io_ring_ctx *ctx, unsigned int nr)
 		if (unlikely(!io_get_sqe(ctx, &sqe))) {
 			io_req_add_to_cache(req, ctx);
 			break;
+		}
+		//zhengxd: get hit info
+		if (sqe->flags & IOSQE_HIT) {
+			struct hitchhiker *hit;
+			int use_hit;
+			use_hit = io_get_hit(ctx, &hit);
+			if(use_hit) req->hit = hit;
 		}
 
 		/*
@@ -2728,6 +2746,10 @@ static void io_rings_free(struct io_ring_ctx *ctx)
 		io_mem_free(ctx->sq_sqes);
 		ctx->rings = NULL;
 		ctx->sq_sqes = NULL;
+		if(ctx->hit){
+			io_mem_free(ctx->hit);
+			ctx->hit = NULL;
+		}
 	} else {
 		io_pages_free(&ctx->ring_pages, ctx->n_ring_pages);
 		io_pages_free(&ctx->sqe_pages, ctx->n_sqe_pages);
@@ -2764,7 +2786,7 @@ static unsigned long rings_size(struct io_ring_ctx *ctx, unsigned int sq_entries
 	if (off == 0)
 		return SIZE_MAX;
 #endif
-
+	// io_ring结构体的末尾等于sq array的起始
 	if (sq_offset)
 		*sq_offset = off;
 
@@ -3403,6 +3425,9 @@ static void *io_uring_validate_mmap_request(struct file *file,
 	case IORING_OFF_CQ_RING:
 		ptr = ctx->rings;
 		break;
+	case IORING_OFF_HIT:
+		ptr = ctx->hit;
+		break;
 	case IORING_OFF_SQES:
 		ptr = ctx->sq_sqes;
 		break;
@@ -3763,6 +3788,20 @@ static __cold int io_allocate_scq_urings(struct io_ring_ctx *ctx,
 	}
 
 	ctx->sq_sqes = ptr;
+
+	//alloc hitchhike
+	if(p->flags & IORING_SETUP_HIT){
+		size = array_size(sizeof(struct hitchhiker), p->sq_entries);
+		ptr = io_mem_alloc(size);
+
+		if (IS_ERR(ptr)) {
+			io_rings_free(ctx);
+			return PTR_ERR(ptr);
+		}
+		ctx->hit = ptr;
+		printk("----hitchhike: init hit buf\n");
+	}
+
 	return 0;
 }
 
@@ -4034,7 +4073,8 @@ static long io_uring_setup(u32 entries, struct io_uring_params __user *params)
 			IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG |
 			IORING_SETUP_SQE128 | IORING_SETUP_CQE32 |
 			IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN |
-			IORING_SETUP_NO_MMAP | IORING_SETUP_REGISTERED_FD_ONLY))
+			IORING_SETUP_NO_MMAP | IORING_SETUP_REGISTERED_FD_ONLY |
+			IORING_SETUP_HIT))
 		return -EINVAL;
 
 	return io_uring_create(entries, &p, params);

@@ -802,7 +802,7 @@ static void __blk_mq_free_request(struct request *rq)
 		blk_queue_exit(q);
 	}
 	blk_mq_sched_restart(hctx);
-	blk_queue_exit(q);
+	if(!rq->hit) blk_queue_exit(q);
 }
 
 void blk_mq_free_request(struct request *rq)
@@ -2963,6 +2963,7 @@ static void blk_mq_get_new_requests_hit(struct request_queue *q,
 
 	data.ctx = blk_mq_get_ctx(q);
 	data.hctx = blk_mq_map_queue(q, data.cmd_flags, data.ctx);
+	data.hit_tags = kmalloc(sizeof(unsigned int) * (bio->hit->max + 1), GFP_KERNEL);
 
 	/*
 	 * Try batched alloc all hit req tags.

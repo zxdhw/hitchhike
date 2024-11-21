@@ -1,6 +1,7 @@
 #ifndef IO_URING_TYPES_H
 #define IO_URING_TYPES_H
 
+#include "linux/aio_abi.h"
 #include <linux/blkdev.h>
 #include <linux/task_work.h>
 #include <linux/bitmap.h>
@@ -194,6 +195,11 @@ struct io_alloc_cache {
 	size_t			elem_size;
 };
 
+struct io_uring_hite {
+	struct io_uring_hit info;
+	unsigned long *addr;
+};
+
 struct io_ring_ctx {
 	/* const or read-mostly hot data */
 	struct {
@@ -245,6 +251,7 @@ struct io_ring_ctx {
 		struct io_uring_sqe	*sq_sqes;
 		unsigned		cached_sq_head;
 		unsigned		sq_entries;
+		struct hitchhiker		*hit;
 
 		/*
 		 * Fixed resources fast path, should be accessed only under
@@ -595,6 +602,9 @@ struct io_kiocb {
 	/* custom credentials, valid IFF REQ_F_CREDS is set */
 	const struct cred		*creds;
 	struct io_wq_work		work;
+
+	// hit pointer
+	struct hitchhiker *hit;
 };
 
 struct io_overflow_cqe {
