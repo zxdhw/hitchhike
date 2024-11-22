@@ -82,6 +82,7 @@ int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	rw->kiocb.ki_pos = READ_ONCE(sqe->off);
 	/* used for fixed read/write too - just read unconditionally */
 	req->buf_index = READ_ONCE(sqe->buf_index);
+	rw->kiocb.hit_enabled = 0;
 
 	if (req->opcode == IORING_OP_READ_FIXED ||
 	    req->opcode == IORING_OP_WRITE_FIXED) {
@@ -390,8 +391,16 @@ static struct iovec *__io_import_iovec(int ddir, struct io_kiocb *req,
 			rw->addr = (unsigned long) buf;
 			rw->len = sqe_len;
 		}
-
-		ret = import_ubuf(ddir, buf, sqe_len, iter);
+		if(req->hit && req->hit->in_use){
+			ret = import_ubuf(ddir, buf, (req->hit->max + 2) * req->hit->size, iter);
+			iter->count_hit = iter->count;
+			iter->count = sqe_len;
+			//zhengxd: FIXME: copy to a true kernel memory, not mmap memory
+			iter->hit = req->hit;
+			rw->kiocb.hit_enabled = HIT_URING;
+		} else {
+			ret = import_ubuf(ddir, buf, sqe_len, iter);
+		}
 		if (ret)
 			return ERR_PTR(ret);
 		return NULL;

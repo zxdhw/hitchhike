@@ -628,11 +628,12 @@ static void iov_iter_iovec_advance(struct iov_iter *i, size_t size)
 
 void iov_iter_advance(struct iov_iter *i, size_t size)
 {
-	if (unlikely(i->count < size))
+	if (!i->hit && unlikely(i->count < size))
 		size = i->count;
 	if (likely(iter_is_ubuf(i)) || unlikely(iov_iter_is_xarray(i))) {
 		i->iov_offset += size;
-		i->count -= size;
+		if (!i->hit) i->count -= size;
+		else  i->count_hit -= size;
 	} else if (likely(iter_is_iovec(i) || iov_iter_is_kvec(i))) {
 		/* iovec and kvec have identical layouts */
 		iov_iter_iovec_advance(i, size);
@@ -1282,6 +1283,11 @@ int iov_iter_npages(const struct iov_iter *i, int maxpages)
 {
 	if (unlikely(!i->count))
 		return 0;
+	if (likely(iter_is_ubuf(i)) && i->hit) {
+		unsigned offs = offset_in_page(i->ubuf + i->iov_offset);
+		int npages = DIV_ROUND_UP(offs + i->count_hit, PAGE_SIZE);
+		return min(npages, maxpages);
+	}
 	if (likely(iter_is_ubuf(i))) {
 		unsigned offs = offset_in_page(i->ubuf + i->iov_offset);
 		int npages = DIV_ROUND_UP(offs + i->count, PAGE_SIZE);
@@ -1824,6 +1830,8 @@ ssize_t iov_iter_extract_pages(struct iov_iter *i,
 			       size_t *offset0)
 {
 	maxsize = min_t(size_t, min_t(size_t, maxsize, i->count), MAX_RW_COUNT);
+	if(i->hit) maxsize = min_t(size_t, min_t(size_t, maxsize, i->count_hit), MAX_RW_COUNT);
+
 	if (!maxsize)
 		return 0;
 

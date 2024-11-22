@@ -593,7 +593,8 @@ static void __submit_bio(struct bio *bio)
 {
 	if (unlikely(!blk_crypto_bio_prep(&bio)))
 		return;
-
+	
+	// zhengxd: nvme devices have no submit_bio function, but null_block has
 	if (!bio->bi_bdev->bd_has_submit_bio) {
 		blk_mq_submit_bio(bio);
 	} else if (likely(bio_queue_enter(bio) == 0)) {
@@ -703,8 +704,10 @@ void submit_bio_noacct_nocheck(struct bio *bio)
 	if (current->bio_list)
 		bio_list_add(&current->bio_list[0], bio);
 	else if (!bio->bi_bdev->bd_has_submit_bio)
+		//nvme scsi devices
 		__submit_bio_noacct_mq(bio);
 	else
+		// null_block
 		__submit_bio_noacct(bio);
 }
 

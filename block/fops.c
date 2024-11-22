@@ -133,10 +133,9 @@ static void blkdev_bio_end_io(struct bio *bio)
 	struct blkdev_dio *dio = bio->bi_private;
 	bool should_dirty = dio->flags & DIO_SHOULD_DIRTY;
 
-	if(bio->hit_enabled && bio->hit){
-		kfree(dio->iocb->hit);
+	if(bio->hit_enabled && bio->hit ){
+		if(bio->hit_enabled & HIT_AIO) kfree(bio->hit);
 		bio->hit = NULL;
-		dio->iocb->hit = NULL;
 	}
 
 	if (bio->bi_status && !dio->bio.bi_status)
@@ -222,6 +221,33 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 		bio->bi_end_io = blkdev_bio_end_io;
 		bio->bi_ioprio = iocb->ki_ioprio;
 
+		//zhengxd:  hit_buf check
+		if(iocb->hit_enabled & HIT_AIO){
+			// zhengxd: address check
+			struct hitchhiker *hit;
+			hit = kmalloc(sizeof(struct hitchhiker), GFP_KERNEL);
+			if(!hit){
+				bio->bi_status = BLK_STS_IOERR;
+				bio_endio(bio);
+				break;
+			}
+			if (unlikely(copy_from_user(hit, iter->uhit, sizeof(struct hitchhiker)))){
+				bio->bi_status = BLK_STS_IOERR;
+				bio_endio(bio);
+				break;
+			}
+			//zhengxd: check hit
+			if(!hit->in_use){
+				iocb->hit_enabled = 0;
+				kfree(hit);
+			} else{
+				bio->hit = hit;
+			}
+			
+		} else if(iocb->hit_enabled & HIT_URING) {
+			bio->hit = iter->hit;
+		}
+
 		//zhengxd: before get page
 		bio->hit_enabled = iocb->hit_enabled;
 
@@ -232,33 +258,17 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 			break;
 		}
 
-		if (bio->hit_enabled) {
-			// zhengxd: address check
-			struct hitchhiker *hit;
-			hit = kmalloc(sizeof(struct hitchhiker), GFP_KERNEL);
-			if(!hit){
-				bio->bi_status = BLK_STS_IOERR;
-				bio_endio(bio);
-				break;
-			}
-			if (unlikely(copy_from_user(hit, iocb->hit, sizeof(struct hitchhiker)))){
-				bio->bi_status = BLK_STS_IOERR;
-				bio_endio(bio);
-				break;
-			}
-
+		if(iocb->hit_enabled){
 			//zhengxd: init bi_size with data_len
-			bio->bi_iter.bi_size = iocb->data_len;
-			iocb->hit = hit;
-			bio->hit = iocb->hit;
+			bio->bi_iter.bi_size = iter->count;
 			
 			if (bio->hit->in_use){
 				int i,ret;
 				loff_t offset;
 				loff_t size = bdev_nr_bytes(bdev);
 				struct address_space *mapping = iocb->ki_filp->f_mapping;
-				for(i = 0; i <= iocb->hit->max && i <= HIT_MAX; i++){
-					offset = iocb->hit->addr[i];
+				for(i = 0; i <= bio->hit->max && i <= HIT_MAX; i++){
+					offset = bio->hit->addr[i];
 
 					if (offset >= size){
 						bio->bi_status = BLK_STS_IOERR;
@@ -266,13 +276,13 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 						break;
 					}
 					ret = filemap_write_and_wait_range(mapping,
-								offset, offset + iocb->data_len - 1);
+								offset, offset + bio->hit->size - 1);
 					if (ret < 0){
 						bio->bi_status = BLK_STS_IOERR;
 						bio_endio(bio);
 						break;
 					}
-					iocb->hit->addr[i] = offset >> SECTOR_SHIFT;
+					bio->hit->addr[i] = offset >> SECTOR_SHIFT;
 				}
 			}
 		}
@@ -343,10 +353,9 @@ static void blkdev_bio_end_io_async(struct bio *bio)
 	struct kiocb *iocb = dio->iocb;
 	ssize_t ret;
 
-	if(bio->hit_enabled && bio->hit){
-		kfree(dio->iocb->hit);
+	if(bio->hit_enabled && bio->hit ){
+		if(bio->hit_enabled & HIT_AIO) kfree(bio->hit);
 		bio->hit = NULL;
-		dio->iocb->hit = NULL;
 	}
 
 	WRITE_ONCE(iocb->private, NULL);
@@ -379,7 +388,6 @@ static ssize_t __blkdev_direct_IO_async(struct kiocb *iocb,
 	struct bio *bio;
 	loff_t pos = iocb->ki_pos;
 	int ret = 0;
-
 	if (blkdev_dio_unaligned(bdev, pos, iter))
 		return -EINVAL;
 
@@ -393,6 +401,36 @@ static ssize_t __blkdev_direct_IO_async(struct kiocb *iocb,
 	bio->bi_iter.bi_sector = pos >> SECTOR_SHIFT;
 	bio->bi_end_io = blkdev_bio_end_io_async;
 	bio->bi_ioprio = iocb->ki_ioprio;
+
+	//zhegnxd: hit_buf check
+	if(iocb->hit_enabled & HIT_AIO){
+		// zhengxd: address check
+		struct hitchhiker *hit;
+		hit = kmalloc(sizeof(struct hitchhiker), GFP_KERNEL);
+		if(!hit){
+			bio_endio(bio);
+			return -ETOOSMALL;
+		}
+		if (unlikely(copy_from_user(hit, iter->uhit, sizeof(struct hitchhiker)))){
+			bio_endio(bio);
+			return -ETOOSMALL;
+		}
+		//zhengxd: check hit
+		if(!hit->in_use){
+			iocb->hit_enabled = 0;
+			kfree(hit);
+		} else{
+			bio->hit = hit;
+		}
+	} else if(iocb->hit_enabled & HIT_URING) {
+		bio->hit = iter->hit;
+	}
+
+	if(iocb->hit_enabled){
+		//zhengxd: init bi_size with data_len
+		bio->hit_enabled = iocb->hit_enabled;
+		bio->bi_iter.bi_size = iter->count;
+	}
 
 	if (iov_iter_is_bvec(iter)) {
 		/*
@@ -420,46 +458,29 @@ static ssize_t __blkdev_direct_IO_async(struct kiocb *iocb,
 		task_io_account_write(bio->bi_iter.bi_size);
 	}
 
-	if (bio->hit_enabled) {
-		// zhengxd: address check
-		struct hitchhiker *hit;
-		hit = kmalloc(sizeof(struct hitchhiker), GFP_KERNEL);
-		if(!hit){
-			bio_endio(bio);
-			return -ETOOSMALL;
-		}
-		if (unlikely(copy_from_user(hit, iocb->hit, sizeof(struct hitchhiker)))){
-			bio_endio(bio);
-			return -ETOOSMALL;
-		}
 
-		//zhengxd: init bi_size with data_len
-		bio->bi_iter.bi_size = iocb->data_len;
-		iocb->hit = hit;
-		bio->hit = iocb->hit;
-		
-		if (bio->hit->in_use){
-			int i,ret;
-			loff_t offset;
-			loff_t size = bdev_nr_bytes(bdev);
-			struct address_space *mapping = iocb->ki_filp->f_mapping;
-			for(i = 0; i <= iocb->hit->max && i <= HIT_MAX; i++){
-				offset = iocb->hit->addr[i];
+	if(iocb->hit_enabled && bio->hit->in_use){
+		int i,ret;
+		loff_t offset;
+		loff_t size = bdev_nr_bytes(bdev);
+		struct address_space *mapping = iocb->ki_filp->f_mapping;
+		for(i = 0; i <= bio->hit->max && i <= HIT_MAX; i++){
+			offset = bio->hit->addr[i];
 
-				if (offset >= size){
-					bio_endio(bio);
-					return -ENOTSUPP;
-				}
-				ret = filemap_write_and_wait_range(mapping,
-							offset, offset + iocb->data_len - 1);
-				if (ret < 0){
-					bio_endio(bio);
-					return -ENOTSUPP;
-				}
-				iocb->hit->addr[i] = offset >> SECTOR_SHIFT;
+			if (offset >= size){
+				bio_endio(bio);
+				return -ENOTSUPP;
 			}
+			ret = filemap_write_and_wait_range(mapping,
+						offset, offset + bio->hit->size - 1);
+			if (ret < 0){
+				bio_endio(bio);
+				return -ENOTSUPP;
+			}
+			bio->hit->addr[i] = offset >> SECTOR_SHIFT;
 		}
 	}
+
 
 	if (iocb->ki_flags & IOCB_NOWAIT)
 		bio->bi_opf |= REQ_NOWAIT;
@@ -688,26 +709,16 @@ static ssize_t blkdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	size_t shorted = 0;
 	ssize_t ret = 0;
 	size_t count;
-
-	if(iocb->hit_enabled){
-		if (unlikely(pos + iocb->data_len > size)) {
+	if (unlikely(pos + iov_iter_count(to) > size)) {
+		if (pos >= size)
 			return 0;
-		}
-	} else {
-		if (unlikely(pos + iov_iter_count(to) > size)) {
-			if (pos >= size)
-				return 0;
-			size -= pos;
-			shorted = iov_iter_count(to) - size;
-			iov_iter_truncate(to, size);
-		}
+		size -= pos;
+		shorted = iov_iter_count(to) - size;
+		iov_iter_truncate(to, size);
 	}
 
 	count = iov_iter_count(to);
 
-	// zhengxd: reinit count
-	if(iocb->hit_enabled)
-		count = iocb->data_len;
 	if (!count)
 		goto reexpand; /* skip atime */
 

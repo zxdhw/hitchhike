@@ -75,12 +75,19 @@ struct iov_iter {
 				void __user *ubuf;
 			};
 			size_t count;
+			size_t count_hit;
 		};
 	};
 	union {
 		unsigned long nr_segs;
 		loff_t xarray_start;
 	};
+
+	union {
+		struct hitchhiker __user	*uhit;
+		struct hitchhiker 	*hit;
+	};
+	
 };
 
 static inline const struct iovec *iter_iov(const struct iov_iter *iter)
@@ -289,6 +296,10 @@ const void *dup_iter(struct iov_iter *new, struct iov_iter *old, gfp_t flags);
 static inline size_t iov_iter_count(const struct iov_iter *i)
 {
 	return i->count;
+}
+static inline size_t iov_iter_count_hit(const struct iov_iter *i)
+{
+	return i->count_hit;
 }
 
 /*

@@ -36,7 +36,7 @@ struct iomap_dio {
 	int			error;
 	size_t			done_before;
 	bool			wait_for_completion;
-
+	struct hitchhiker * hit;
 	union {
 		/* used during submission and for synchronous completion: */
 		struct {
@@ -155,9 +155,10 @@ void iomap_dio_bio_end_io(struct bio *bio)
 	bool should_dirty = (dio->flags & IOMAP_DIO_DIRTY);
 
 	if(bio->hit_enabled){
-		kfree(dio->iocb->hit);
+		if(bio->hit_enabled & HIT_AIO) kfree(bio->hit);
 		bio->hit = NULL;
-		dio->iocb->hit = NULL;
+		dio->hit = NULL;
+		// dio->submit.iter->hit = NULL;
 	}
 
 	if (bio->bi_status)
@@ -339,20 +340,19 @@ static loff_t iomap_dio_bio_iter(const struct iomap_iter *iter,
 		}
 
 		if (bio->hit_enabled) {
-
 			//zhengxd: init bi_size with data_len
-			bio->bi_iter.bi_size = dio->iocb->data_len;
-			bio->hit = dio->iocb->hit;
+			bio->bi_iter.bi_size = dio->submit.iter->count;
+			bio->hit = dio->hit;
 			u64 len, end, offset;
-			int iter;
+			int i;
 			if(bio->hit->in_use){
-				for(iter = 0; iter <= bio->hit->max && (iter <= HIT_MAX) ; iter++){
+				for(i = 0; i <= bio->hit->max && (i <= HIT_MAX) ; i++){
 					//zhengxd: size should to be the same
 					len = bio->hit->size;
-					offset = bio->hit->addr[iter];
+					offset = bio->hit->addr[i];
 					struct iomap iomap_t = { .type = IOMAP_HOLE };
 					struct iomap srcmap_t = { .type = IOMAP_HOLE };
-					ret = dio->iocb->ops->iomap_begin(inode, offset, len, iomap->flags, &iomap_t, &srcmap_t);
+					ret = iter->ops->iomap_begin(inode, offset, len, iomap->flags, &iomap_t, &srcmap_t);
 					if (ret){
 						bio_put(bio);
 						return ret;
@@ -374,11 +374,11 @@ static loff_t iomap_dio_bio_iter(const struct iomap_iter *iter,
 						len = end - offset;
 					// lba in 512B
 					if(len != bio->hit->size){
-						printk("hitchhike iomap hit error: length is %lld", len);
+						printk("-----hitchhike iomap hit error: length is %lld", len);
 						bio_put(bio);
 						return -EIO;
 					}
-					bio->hit->addr[iter] = iomap_sector(&iomap_t, offset);
+					bio->hit->addr[i] = iomap_sector(&iomap_t, offset);
 				
 				}
 			}
@@ -399,7 +399,7 @@ static loff_t iomap_dio_bio_iter(const struct iomap_iter *iter,
 						 BIO_MAX_VECS);
 		if (bio->hit_enabled) {
 			if(nr_pages){
-				printk("hitchhike: iomap dio error: nrpage is %d",nr_pages);
+				printk("-----hitchhike: iomap dio error: nrpage is %d",nr_pages);
 			}
 		}
 		/*
@@ -529,6 +529,9 @@ static loff_t iomap_dio_iter(const struct iomap_iter *iter,
  * Returns -ENOTBLK In case of a page invalidation invalidation failure for
  * writes.  The callers needs to fall back to buffered I/O in this case.
  */
+/*----zhengxd kernel stat*/
+extern atomic_long_t filemap_wait_time;
+extern atomic_long_t filemap_wait_count;
 struct iomap_dio *
 __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		const struct iomap_ops *ops, const struct iomap_dio_ops *dops,
@@ -541,13 +544,8 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		.len		= iov_iter_count(iter),
 		.flags		= IOMAP_DIRECT,
 		.private	= private,
+		.ops		= ops,
 	};
-	
-	//zhengxd: get hitchhike data size
-	size_t data_len = iocb->data_len;
-	if(iocb->hit_enabled){
-		iomi.len = data_len;
-	}
 
 	bool wait_for_completion =
 		is_sync_kiocb(iocb) || (dio_flags & IOMAP_DIO_FORCE_WAIT);
@@ -586,8 +584,9 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 
 		if (user_backed_iter(iter))
 			dio->flags |= IOMAP_DIO_DIRTY;
-
+		// ktime_t filemap_start = ktime_get();
 		ret = kiocb_write_and_wait(iocb, iomi.len);
+		// atomic_long_add(ktime_sub(ktime_get(), filemap_start), &filemap_wait_time);
 		if (ret)
 			goto out_free_dio;
 	} else {
@@ -638,28 +637,36 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		}
 	}
 
-	if(iocb->hit_enabled){
-		// zhengxd: kernel stat
-		// ktime_t hit_start = ktime_get();
+	if(iocb->hit_enabled & HIT_AIO){
 		struct hitchhiker *hit;
 		hit = kmalloc(sizeof(struct hitchhiker), GFP_KERNEL);
 		if(!hit){
 			goto out_free_dio;
 		}
-		if (unlikely(copy_from_user(hit, dio->iocb->hit, sizeof(struct hitchhiker)))){
+		if (unlikely(copy_from_user(hit, iter->uhit, sizeof(struct hitchhiker)))){
 			goto out_free_dio;
 		}
-		
-		// atomic_long_add(ktime_sub(ktime_get(), hit_start), &hit_buf_time);
-		dio->iocb->hit = hit;
+		//zhengxd: hitchhike enalbed?
+		if(!hit->in_use){
+			iocb->hit_enabled = 0;
+			kfree(hit);
+		} else{
+			dio->hit = hit;
+		}
+	} else if(iocb->hit_enabled & HIT_URING){
+		dio->hit = iter->hit;
+	}
 
+	if(iocb->hit_enabled){
 		int i;
 		struct address_space *mapping = iocb->ki_filp->f_mapping;
-		for(i = 0; i <= iocb->hit->max && i <= HIT_MAX; i++){
-			ret = rw_verify_area(READ, iocb->ki_filp, &iocb->hit->addr[i], data_len);
+		for(i = 0; i <= dio->hit->max && i <= HIT_MAX; i++){
+			const long long addr = dio->hit->addr[i];
+			ret = rw_verify_area(READ, iocb->ki_filp, &addr, dio->hit->size);
 			if (ret)
 				goto out_free_dio;
-			ret = filemap_write_and_wait_range(mapping, iocb->hit->addr[i], (iocb->hit->addr[i] + data_len - 1));
+			ret = filemap_write_and_wait_range(mapping, dio->hit->addr[i], 
+												(dio->hit->addr[i] + dio->hit->size - 1));
 			if (ret)
 				goto out_free_dio;
 		}
@@ -758,10 +765,6 @@ iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		unsigned int dio_flags, void *private, size_t done_before)
 {
 	struct iomap_dio *dio;
-	//zhengxd: pass the iomap ops to iocb
-	if(iocb->hit_enabled){
-		iocb->ops = ops;
-	}
 
 	dio = __iomap_dio_rw(iocb, iter, ops, dops, dio_flags, private,
 			     done_before);

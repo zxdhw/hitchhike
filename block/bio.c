@@ -258,6 +258,7 @@ void bio_init(struct bio *bio, struct block_device *bdev, struct bio_vec *table,
 	bio->bi_iter.bi_bvec_done = 0;
 	bio->bi_end_io = NULL;
 	bio->bi_private = NULL;
+	bio->hit_enabled = 0;
 #ifdef CONFIG_BLK_CGROUP
 	bio->bi_blkg = NULL;
 	bio->bi_issue.value = 0;
@@ -1363,7 +1364,7 @@ int bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter)
 		bio_set_flag(bio, BIO_PAGE_PINNED);
 	do {
 		ret = __bio_iov_iter_get_pages(bio, iter);
-	} while (!ret && iov_iter_count(iter) && !bio_full(bio, 0));
+	} while (!ret && iov_iter_count(iter) && iov_iter_count_hit(iter) && !bio_full(bio, 0));
 
 	return bio->bi_vcnt ? 0 : ret;
 }

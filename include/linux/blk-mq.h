@@ -188,12 +188,13 @@ struct request {
 	};
 
 	//zhengxd: hit related
-	u64 hit_value;
-	u64 hit;
-	u64 once;
-	unsigned int *hit_tags;
+	u32 hit_value;
+	u16 hit_enabled;
+	u16 once;
+	struct request **hit_rqs;
+	struct request *hit_rq;
 	int main_tag;
-	struct request* main_req;
+	struct request *main_req;
 	
 	/*
 	 * completion callback.

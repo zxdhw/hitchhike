@@ -356,8 +356,10 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
 	rq->main_tag = -1;
 	rq->hit_value = 0;
 	rq->once = 1;
-	rq->hit = 0;
+	rq->hit_enabled = 0;
 	rq->main_req = NULL;
+	rq->hit_rq = NULL;
+	rq->hit_rqs = NULL;
 
 	rq->q = q;
 	rq->mq_ctx = ctx;
@@ -421,11 +423,15 @@ static struct request *blk_mq_rq_ctx_init_hit(struct blk_mq_alloc_data *data,
 	rq->cmd_flags = data->cmd_flags;
 
 	//zhengxd: use for complete
-	rq->main_tag = main_req->main_tag;
-	rq->hit = 1;
+	rq->main_tag = main_req->tag;
+	rq->hit_enabled = 1;
 	rq->hit_value = 0;
 	rq->main_req = main_req;
 	rq->once = 0;
+	rq->hit_rq = NULL;
+	rq->hit_rqs = NULL;
+	//zhengxd: use for irq(command id -> req)
+	data->hctx->tags->rqs[tag] = rq;
 
 	rq->rq_flags = data->rq_flags;
 	rq->tag = tag;
@@ -458,8 +464,8 @@ __blk_mq_alloc_requests_batch_hit(struct blk_mq_alloc_data *data, struct request
 	struct request *rq;
 	unsigned long tag_mask;
 	int i, nr = 0;
-
-	tag_mask = blk_mq_get_tags(data, data->nr_tags, &tag_offset);
+	int tag_batch = min_t(unsigned int, data->nr_tags, BLK_MAX_REQUEST_COUNT); 
+	tag_mask = blk_mq_get_tags(data, tag_batch, &tag_offset);
 	if (unlikely(!tag_mask))
 		return NULL;
 
@@ -468,11 +474,11 @@ __blk_mq_alloc_requests_batch_hit(struct blk_mq_alloc_data *data, struct request
 		if (!(tag_mask & (1UL << i)))
 			continue;
 		tag = tag_offset + i;
-		// init hit 
-		data->hit_tags[data->nr++] = tag;
 		prefetch(tags->static_rqs[tag]);
 		tag_mask &= ~(1UL << i);
 		rq = blk_mq_rq_ctx_init_hit(data, tags, tag, main_req);
+		//zhengxd: init hit rqs
+		rq_list_add(data->hit_rqs, rq);
 		nr++;
 	}
 	/* caller already holds a reference, add for remainder */
@@ -796,13 +802,13 @@ static void __blk_mq_free_request(struct request *rq)
 	if (sched_tag != BLK_MQ_NO_TAG)
 		blk_mq_put_tag(hctx->sched_tags, ctx, sched_tag);
 
-	if(rq->hit_tags){
-		kfree(rq->hit_tags);
-		rq->hit_tags = NULL;
-		blk_queue_exit(q);
+	if(rq->hit_rqs){
+		rq->hit_rqs = NULL;
+		// blk_queue_exit(q);
 	}
 	blk_mq_sched_restart(hctx);
-	if(!rq->hit) blk_queue_exit(q);
+	// if(!rq->hit_enabled) blk_queue_exit(q);
+	blk_queue_exit(q);
 }
 
 void blk_mq_free_request(struct request *rq)
@@ -2959,12 +2965,11 @@ static void blk_mq_get_new_requests_hit(struct request_queue *q,
 		.nr_tags	= (bio->hit->max + 1),
 		.cmd_flags	= bio->bi_opf,
 		.nr		= 0,
+		.hit_rqs = &req->hit_rq,
 	};
 
 	data.ctx = blk_mq_get_ctx(q);
 	data.hctx = blk_mq_map_queue(q, data.cmd_flags, data.ctx);
-	data.hit_tags = kmalloc(sizeof(unsigned int) * (bio->hit->max + 1), GFP_KERNEL);
-
 	/*
 	 * Try batched alloc all hit req tags.
 	 */
@@ -2975,7 +2980,7 @@ static void blk_mq_get_new_requests_hit(struct request_queue *q,
 			msleep(3);
 		}
 	}
-	req->hit_tags = data.hit_tags;
+	req->hit_rqs = data.hit_rqs;
 }
 
 static struct request *blk_mq_get_new_requests(struct request_queue *q,
@@ -3090,9 +3095,9 @@ void blk_mq_submit_bio(struct bio *bio)
 	//zhengxd: fixme, check bufferlen && max
 	if(bio->hit_enabled && bio->hit->in_use){
 		nr_segs = bio->hit->max+2;
-	}else if(bio->hit_enabled && !bio->hit->in_use){
+	} else if(bio->hit_enabled && !bio->hit->in_use){
 		nr_segs = 1;
-	}else{
+	}  else{
 		if (bio_may_exceed_limits(bio, &q->limits)) {
 			bio = __bio_split_to_limits(bio, &q->limits, &nr_segs);
 			if (!bio)
@@ -3116,6 +3121,7 @@ void blk_mq_submit_bio(struct bio *bio)
 	// zhengxd: alloc hitchhike req
 	if(bio->hit_enabled && bio->hit->in_use){
 		//zhengxd: kernel stat
+		rq->hit_enabled = bio->hit_enabled;
 		blk_mq_get_new_requests_hit(q, plug, bio, nr_segs,rq);
 	}
 

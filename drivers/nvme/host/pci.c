@@ -71,7 +71,7 @@ static const struct kernel_param_ops io_queue_depth_ops = {
 	.get = param_get_uint,
 };
 
-static unsigned int io_queue_depth = 1024;
+static unsigned int io_queue_depth = 4096;
 module_param_cb(io_queue_depth, &io_queue_depth_ops, &io_queue_depth, 0644);
 MODULE_PARM_DESC(io_queue_depth, "set io queue depth, should >= 2 and < 4096");
 
@@ -671,7 +671,6 @@ static blk_status_t nvme_pci_setup_prps_hit(struct nvme_dev *dev,
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
 	struct dma_pool *pool;;
-	int length = blk_rq_payload_bytes(req);
 	struct scatterlist *sg = iod->sgt.sgl;
 	int dma_len = sg_dma_len(sg);
 	u64 dma_addr = sg_dma_address(sg);
@@ -679,12 +678,6 @@ static blk_status_t nvme_pci_setup_prps_hit(struct nvme_dev *dev,
 	__le64 *prp_list;
 	dma_addr_t prp_dma;
 	int i;
-
-    length -= (NVME_CTRL_PAGE_SIZE - offset);
-    if (length <= 0) {
-        iod->first_dma = 0;
-        goto done;
-    }
 
 	pool = dev->prp_page_pool;
 	iod->nr_allocations = 1;
@@ -696,7 +689,6 @@ static blk_status_t nvme_pci_setup_prps_hit(struct nvme_dev *dev,
 	}
 	iod->list[0].prp_list = prp_list;
 	iod->first_dma = prp_dma;
-	i=0;
 
 	sg = sg_next(sg);
 	dma_len = sg_dma_len(sg);
@@ -717,13 +709,10 @@ static blk_status_t nvme_pci_setup_prps_hit(struct nvme_dev *dev,
 		}
 		prp_list[i++] = cpu_to_le64(dma_addr);
         dma_len -= NVME_CTRL_PAGE_SIZE;
-        dma_addr += NVME_CTRL_PAGE_SIZE;
-        if (dma_len > 0){
-			printk("----hitchhike: pagesize > 4K\n");
+        if (unlikely(dma_len != 0)){
+			printk("----hitchhike: pagesize != 4K\n");
             goto bad_sgl;
 		}
-        if (unlikely(dma_len < 0))
-            goto bad_sgl;
         sg = sg_next(sg);
 		if(!sg) {
 			break;
@@ -731,8 +720,6 @@ static blk_status_t nvme_pci_setup_prps_hit(struct nvme_dev *dev,
         dma_addr = sg_dma_address(sg);
         dma_len = sg_dma_len(sg);
 	}
-
-done:
 	cmnd->dptr.prp1 = cpu_to_le64(sg_dma_address(iod->sgt.sgl));
 	// zhengxd: fixme, prp2 dont use in driver,every req need a single segment
 	// cmnd->dptr.prp2 = cpu_to_le64(iod->first_dma);
@@ -858,7 +845,6 @@ static blk_status_t nvme_map_data(struct nvme_dev *dev, struct request *req,
 	if (blk_rq_nr_phys_segments(req) == 1) {
 		struct nvme_queue *nvmeq = req->mq_hctx->driver_data;
 		struct bio_vec bv = req_bvec(req);
-
 		if (!is_pci_p2pdma_page(bv.bv_page)) {
 			if (bv.bv_offset + bv.bv_len <= NVME_CTRL_PAGE_SIZE * 2)
 				return nvme_setup_prp_simple(dev, req,
@@ -887,12 +873,13 @@ static blk_status_t nvme_map_data(struct nvme_dev *dev, struct request *req,
 			ret = BLK_STS_TARGET;
 		goto out_free_sg;
 	}
-	if(req->bio->hit_enabled)
+	if(req->bio && req->hit_enabled){
 		ret = nvme_pci_setup_prps_hit(dev, req, &cmnd->rw);
-	else if (nvme_pci_use_sgls(dev, req, iod->sgt.nents))
+	} else if (nvme_pci_use_sgls(dev, req, iod->sgt.nents)) {
 		ret = nvme_pci_setup_sgls(dev, req, &cmnd->rw);
-	else
+	} else {
 		ret = nvme_pci_setup_prps(dev, req, &cmnd->rw);
+	}
 	if (ret != BLK_STS_OK)
 		goto out_unmap_sg;
 	return BLK_STS_OK;
@@ -917,55 +904,47 @@ static blk_status_t nvme_map_metadata(struct nvme_dev *dev, struct request *req,
 	return BLK_STS_OK;
 }
 
-// static void nvme_submit_work(struct work_struct *work){
 static void nvme_submit_cmd_work(struct request *req, struct nvme_queue *nvmeq){
 
-	if (req->bio->hit && !req->bio->hit->in_use) {
-		/* nromal io */
-		return;
-	}
-
 	req->once=0;
-	loff_t data_len;
-	u64 disk_offset, iter;
-	struct nvme_command cmd;
-	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
-	__le64 *prp_list = iod->list[0].prp_list;
-	// struct request* req_now;
-
-	/* address mapping */
-	// lba in 512B
-// retry:
 	if(req->bio->hit->max > HIT_MAX || req->bio->hit->max < 0){
 		req->once=1;
 		return;
 	}
 
+	u32 data_len;
+	u64 disk_offset, iter;
+	struct nvme_command cmd;
+	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
+	__le64 *prp_list = iod->list[0].prp_list;
 	memcpy(&cmd, nvme_req(req)->cmd, sizeof(struct nvme_command));
-	spin_lock(&nvmeq->sq_lock);
-	for(iter = 0; iter <= req->bio->hit->max && iter <= HIT_MAX; ) {
-		
+
+	for(iter = 0; iter <= req->bio->hit->max && iter <= HIT_MAX; iter++) {
 		//zhengxd: lba in 512B, datalen in bytes
 		disk_offset = req->bio->hit->addr[iter];
 		data_len = req->bio->hit->size;
-		//zhengxd: slba (512B)
+		//zhengxd: slba (512B) length(7 sector), addr(bytes)
 		cmd.rw.slba = cpu_to_le64(nvme_sect_to_lba(req->q->queuedata, disk_offset));
 		cmd.rw.length = cpu_to_le16((data_len >> SECTOR_SHIFT) - 1);
-		cmd.rw.command_id = req->hit_tags[iter];
-		
-		//zhengxd: length(7 sector), addr(bytes)
-		
+
+		// tag -> commandid 
+		if(rq_list_empty(*req->hit_rqs)){
+			break;
+		}
+		cmd.rw.command_id = nvme_cid(rq_list_pop(req->hit_rqs));
+
 		cmd.rw.dptr.prp1 = prp_list[iter];
 		if((prp_list[iter] & (SECTOR_SIZE - 1)) != 0){
 			printk("----nvme_submit_work: dma dismatch error\n");
+			//zhengxd: fixme, need to check the number of submitted requests
+			req->bio->hit->max = iter;
+			break;
 		}
-
+		spin_lock(&nvmeq->sq_lock);
 		nvme_sq_copy_cmd(nvmeq, &cmd);
 		nvme_write_sq_db(nvmeq, false);
-		
-		iter++;
+		spin_unlock(&nvmeq->sq_lock);
 	}
-	spin_unlock(&nvmeq->sq_lock);
 }
 
 static blk_status_t nvme_prep_rq(struct nvme_dev *dev, struct request *req)
@@ -996,7 +975,6 @@ static blk_status_t nvme_prep_rq(struct nvme_dev *dev, struct request *req)
 
 	//submit hitchhike req
 	if(req->bio && req->bio->hit_enabled){
-		req->hit = 1;
 		nvme_submit_cmd_work(req,nvmeq);
 	}
 
@@ -1012,9 +990,11 @@ out_free_cmd:
 /*
  * NOTE: ns is NULL when called on the admin queue.
  */
+ extern atomic_long_t driver_time;
 static blk_status_t nvme_queue_rq(struct blk_mq_hw_ctx *hctx,
 			 const struct blk_mq_queue_data *bd)
 {
+	// ktime_t driver_start = ktime_get();
 	struct nvme_queue *nvmeq = hctx->driver_data;
 	struct nvme_dev *dev = nvmeq->dev;
 	struct request *req = bd->rq;
@@ -1034,10 +1014,12 @@ static blk_status_t nvme_queue_rq(struct blk_mq_hw_ctx *hctx,
 	ret = nvme_prep_rq(dev, req);
 	if (unlikely(ret))
 		return ret;
+
 	spin_lock(&nvmeq->sq_lock);
 	nvme_sq_copy_cmd(nvmeq, &iod->cmd);
 	nvme_write_sq_db(nvmeq, bd->last);
 	spin_unlock(&nvmeq->sq_lock);
+	// atomic_long_add(ktime_sub(ktime_get(), driver_start), &driver_time);
 	return BLK_STS_OK;
 }
 
@@ -1071,6 +1053,7 @@ static bool nvme_prep_rq_batch(struct nvme_queue *nvmeq, struct request *req)
 
 static void nvme_queue_rqs(struct request **rqlist)
 {
+	// ktime_t driver_start = ktime_get();
 	struct request *req, *next, *prev = NULL;
 	struct request *requeue_list = NULL;
 
@@ -1097,6 +1080,7 @@ static void nvme_queue_rqs(struct request **rqlist)
 	}
 
 	*rqlist = requeue_list;
+	// atomic_long_add(ktime_sub(ktime_get(), driver_start), &driver_time);
 }
 
 static __always_inline void nvme_pci_unmap_rq(struct request *req)
@@ -1125,17 +1109,15 @@ static void nvme_pci_complete_rq_hit(struct request *req)
 		main_req = req;
 	}
 
-	if(main_req->hit_value == main_req->bio->hit->max + 2 || main_req->once == 1){
-		nvme_pci_unmap_rq(req);
+	if(main_req->hit_value == main_req->bio->hit->max + 2){
+		nvme_pci_unmap_rq(main_req);
 	}
 
-	if(req->once){
-		nvme_complete_rq(req);
-	}else if(req->main_tag >= 0 && main_req->hit_value == main_req->bio->hit->max + 2){
+	if(req->main_tag >= 0 && main_req->hit_value == main_req->bio->hit->max + 2){
 		nvme_complete_rq(req);
 		nvme_complete_rq(main_req);
 	}else if(req->main_tag < 0 && main_req->hit_value != main_req->bio->hit->max + 2){
-		//zhengxd: mian_req must return last
+		// zhengxd: main_req must return last
 	}else{
 		nvme_complete_rq(req);
 	}
@@ -1194,7 +1176,6 @@ static inline void nvme_handle_cqe(struct nvme_queue *nvmeq,
 				cqe->status, &cqe->result);
 		return;
 	}
-
 	req = nvme_find_rq(nvme_queue_tagset(nvmeq), command_id);
 	if (unlikely(!req)) {
 		dev_warn(nvmeq->dev->ctrl.device,
@@ -1210,7 +1191,7 @@ static inline void nvme_handle_cqe(struct nvme_queue *nvmeq,
 		req->main_req->hit_value++;
 	}
 
-	if(req->hit){
+	if(req->hit_enabled){
 		if (!nvme_try_complete_req(req, cqe->status, cqe->result))
 			nvme_pci_complete_rq_hit(req);
 	} else if (!nvme_try_complete_req(req, cqe->status, cqe->result) &&
@@ -1253,14 +1234,19 @@ static inline int nvme_poll_cq(struct nvme_queue *nvmeq,
 	return found;
 }
 
+extern atomic_long_t interrupt_time;
+extern atomic_long_t interrupt_count;
+
 static irqreturn_t nvme_irq(int irq, void *data)
 {
+	// ktime_t irq_start = ktime_get();
 	struct nvme_queue *nvmeq = data;
 	DEFINE_IO_COMP_BATCH(iob);
 
 	if (nvme_poll_cq(nvmeq, &iob)) {
 		if (!rq_list_empty(iob.req_list))
 			nvme_pci_complete_batch(&iob);
+		// atomic_long_add(ktime_sub(ktime_get(), irq_start), &interrupt_time);
 		return IRQ_HANDLED;
 	}
 	return IRQ_NONE;

@@ -71,6 +71,9 @@ static inline void iomap_iter_done(struct iomap_iter *iter)
  * of the loop body:  leave @iter.processed unchanged, or set it to a negative
  * errno.
  */
+extern atomic_long_t iomap_time;
+extern atomic_long_t iomap_count;
+
 int iomap_iter(struct iomap_iter *iter, const struct iomap_ops *ops)
 {
 	int ret;
@@ -87,9 +90,11 @@ int iomap_iter(struct iomap_iter *iter, const struct iomap_ops *ops)
 	ret = iomap_iter_advance(iter);
 	if (ret <= 0)
 		return ret;
-
+	
+	// ktime_t iomap_start = ktime_get();
 	ret = ops->iomap_begin(iter->inode, iter->pos, iter->len, iter->flags,
 			       &iter->iomap, &iter->srcmap);
+	// atomic_long_add(ktime_sub(ktime_get(), iomap_start), &iomap_time);
 	if (ret < 0)
 		return ret;
 	iomap_iter_done(iter);

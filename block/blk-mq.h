@@ -161,7 +161,7 @@ struct blk_mq_alloc_data {
 
 	/* hit tag*/
 	unsigned int nr;
-	unsigned int *hit_tags;
+	struct request **hit_rqs;
 
 };
 

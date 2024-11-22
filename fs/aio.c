@@ -1457,10 +1457,6 @@ static void aio_remove_iocb(struct aio_kiocb *iocb)
 
 static void aio_complete_rw(struct kiocb *kiocb, long res)
 {
-	//zhengxd: clean hit;
-	if(kiocb->hit_enabled){
-		kiocb->hit = NULL;
-	}
 
 	struct aio_kiocb *iocb = container_of(kiocb, struct aio_kiocb, rw);
 
@@ -1491,11 +1487,7 @@ static int aio_prep_rw(struct kiocb *req, const struct iocb *iocb)
 	req->ki_complete = aio_complete_rw;
 	req->private = NULL;
 	req->ki_pos = iocb->aio_offset;
-	
-	//zhengxd: new: data_len(aio_reserved2) init
-	if(req->hit_enabled){
-		req->data_len = iocb->aio_dsize;
-	}
+	req->hit_enabled = 0;
 
 	req->ki_flags = req->ki_filp->f_iocb_flags;
 	if (iocb->aio_flags & IOCB_FLAG_RESFD)
@@ -1538,6 +1530,7 @@ static ssize_t aio_setup_rw(int rw, const struct iocb *iocb,
 		// ktime_t setup_start = ktime_get();
 		ssize_t ret = import_single_range(rw, buf, len, *iovec, iter);
 		*iovec = NULL;
+		iter->uhit = NULL;
 		// atomic_long_add(ktime_sub(ktime_get(), setup_start), &aio_setup_time);
 		return ret;
 	}
@@ -1565,6 +1558,8 @@ static inline void aio_rw_done(struct kiocb *req, ssize_t ret)
 	}
 }
 
+extern atomic_long_t verify_time;
+extern atomic_long_t verify_count;
 static int aio_read(struct kiocb *req, const struct iocb *iocb,
 			bool vectored, bool compat)
 {
@@ -1585,7 +1580,9 @@ static int aio_read(struct kiocb *req, const struct iocb *iocb,
 	ret = aio_setup_rw(ITER_DEST, iocb, &iovec, vectored, compat, &iter);
 	if (ret < 0)
 		return ret;
+	// ktime_t verify_start = ktime_get();
 	ret = rw_verify_area(READ, file, &req->ki_pos, iov_iter_count(&iter));
+	// atomic_long_add(ktime_sub(ktime_get(), verify_start), &verify_time);
 	if (!ret)
 		aio_rw_done(req, call_read_iter(file, req, &iter));
 	kfree(iovec);
@@ -2123,28 +2120,29 @@ static int aio_read_hit(struct kiocb *req, const struct iocb *iocb,
 	struct iov_iter iter;
 	struct file *file;
 	int ret;
-	
-	// zhengxd: kiocb init with hit info
-	req->hit = hit;
-	req->hit_enabled = true;
 
-	//zhengxd: new: data_len(aio_reserved2) init
 	ret = aio_prep_rw(req, iocb);
 	if (ret)
 		return ret;
+
+	// zhengxd: kiocb init with hit info
+	req->hit_enabled = HIT_AIO;
+
 	file = req->ki_filp;
 	if (unlikely(!(file->f_mode & FMODE_READ)))
 		return -EBADF;
 	if (unlikely(!file->f_op->read_iter))
 		return -EINVAL;
-
 	// zhengxd:  packaging buffer in iov & iter, use '*buf' and 'aio_nbytes'
 	ret = aio_setup_rw(ITER_DEST, iocb, &iovec, vectored, compat, &iter);
 	if (ret < 0)
 		return ret;
+	iter.count_hit = iter.count;
+	iter.count = iocb->aio_dsize;
+	iter.uhit = hit;
 
 	//zhengxd: new: data_len; old: iov_iter_count(&iter);
-	ret = rw_verify_area(READ, file, &req->ki_pos, req->data_len);
+	ret = rw_verify_area(READ, file, &req->ki_pos, iocb->aio_dsize);
 	if (!ret)
 		aio_rw_done(req, call_read_iter(file, req, &iter));
 	kfree(iovec);

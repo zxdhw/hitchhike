@@ -394,7 +394,7 @@ void nvme_complete_rq(struct request *req)
 {
 	struct nvme_ctrl *ctrl = nvme_req(req)->ctrl;
 
-	if(!req->hit || (req->hit && (req->main_tag < 0)) )
+	if(!req->hit_enabled || (req->hit_enabled && (req->main_tag < 0)) )
 		trace_nvme_complete_rq(req);
 	nvme_cleanup_cmd(req);
 

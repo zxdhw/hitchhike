@@ -105,7 +105,7 @@
 				 IORING_REGISTER_LAST + IORING_OP_LAST)
 
 #define SQE_COMMON_FLAGS (IOSQE_FIXED_FILE | IOSQE_IO_LINK | \
-			  IOSQE_IO_HARDLINK | IOSQE_ASYNC)
+			  IOSQE_IO_HARDLINK | IOSQE_ASYNC | IOSQE_HIT)
 
 #define SQE_VALID_FLAGS	(SQE_COMMON_FLAGS | IOSQE_BUFFER_SELECT | \
 			IOSQE_IO_DRAIN | IOSQE_CQE_SKIP_SUCCESS)
@@ -2391,7 +2391,7 @@ static bool io_get_sqe(struct io_ring_ctx *ctx, const struct io_uring_sqe **sqe)
 static bool io_get_hit(struct io_ring_ctx *ctx, struct hitchhiker **hit)
 {
 	unsigned head, mask = ctx->sq_entries - 1;
-	unsigned sq_idx = ctx->cached_sq_head++ & mask;
+	unsigned sq_idx = (ctx->cached_sq_head - 1) & mask;
 
 	head = READ_ONCE(ctx->sq_array[sq_idx]);
 	*hit = &ctx->hit[head];
@@ -2424,6 +2424,7 @@ int io_submit_sqes(struct io_ring_ctx *ctx, unsigned int nr)
 			break;
 		}
 		//zhengxd: get hit info
+		req->hit = NULL;
 		if (sqe->flags & IOSQE_HIT) {
 			struct hitchhiker *hit;
 			int use_hit;
@@ -3799,7 +3800,6 @@ static __cold int io_allocate_scq_urings(struct io_ring_ctx *ctx,
 			return PTR_ERR(ptr);
 		}
 		ctx->hit = ptr;
-		printk("----hitchhike: init hit buf\n");
 	}
 
 	return 0;

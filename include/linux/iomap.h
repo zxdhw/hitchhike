@@ -217,6 +217,7 @@ struct iomap_iter {
 	struct iomap iomap;
 	struct iomap srcmap;
 	void *private;
+	const struct iomap_ops *ops;
 };
 
 int iomap_iter(struct iomap_iter *iter, const struct iomap_ops *ops);
